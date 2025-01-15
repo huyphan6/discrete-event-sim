@@ -4,6 +4,7 @@ import (
 	"container/heap"
 	"fmt"
 	"math/rand"
+	"time"
 )
 
 // event struct to represent processing and repair events
@@ -65,61 +66,49 @@ type Simulation struct {
 // func to run the sim and return 3 duration percentages (50, 90 and 100)
 func (s *Simulation) run(seed int64) (percentileTime [3]int) {
 	rgen := rand.New(rand.NewSource(seed))
+	eventChannel := make(chan Event)
+	doneChannel := make(chan struct{})
+	var inflight, broken int
 
-	time := 0
-	done := 0
-	inflight := 0
-	broken := 0
-
-	for done < s.jobCount {
-		nextEvent := heap.Pop(s.eventQ).(*Event)
-		time = nextEvent.time
-
-		switch nextEvent.etype {
-		case "REPAIR":
-			broken--
-		case "DONE":
-			done++
-			inflight--
-		}
-
-		// schedule new repairs if processors are broken
-		for broken < s.processors && rgen.Float32() < s.breakChance {
-			broken++
-			// probabilistic repair yime
-			repairTime := s.repairTime + int(rgen.NormFloat64()*float64(s.repairTime)/4)
-			if repairTime < 0 {
-				repairTime = 0
+	// create a go routine for each processing unit, each proccessor will have its own go routine
+	for i := 0; i < s.processors; i++ {
+		go func() {
+			for {
+				// dice roll to see if the pu breaks
+				// append a repair event to the event channel
+				if rgen.Float32() < s.breakChance {
+					repairTime := s.repairTime + int(rgen.NormFloat64()*float64(s.repairTime)/4)
+					eventChannel <- Event{etype: "REPAIR", time: repairTime}
+					time.Sleep(time.Duration(repairTime) * time.Millisecond)
+				}
+				// otherwise, process the event and append a done event to the event channel
+				processingTime := s.processingTime + int(rgen.NormFloat64()*float64(s.processingTime)/4)
+				eventChannel <- Event{etype: "DONE", time: processingTime}
+				time.Sleep(time.Duration(processingTime) * time.Millisecond)
 			}
-			heap.Push(s.eventQ, &Event{
-				time:  time + repairTime,
-				etype: "REPAIR",
-			})
-		}
-
-		// schedule new processing tasks for healthy processors
-		for inflight < s.processors-broken && done+inflight < s.jobCount {
-			inflight++
-			processingTime := s.processingTime + int(rgen.NormFloat64()*float64(s.processingTime)/4)
-			if processingTime < 0 {
-				processingTime = 0
-			}
-			heap.Push(s.eventQ, &Event{
-				time:  time + processingTime,
-				etype: "DONE",
-			})
-		}
-
-		// calculate percentiles
-		percentDone := 100 * done / s.jobCount
-		percentiles := []int{50, 75, 100}
-		for idx, p := range percentiles {
-			if percentDone >= p && percentileTime[idx] == 0 {
-				percentileTime[idx] = time
-			}
-		}
+		}()
 	}
 
+	// central event loop, listens on eventChannel, channels in Go are FIFO so they behave like queues
+	go func() {
+		for done := 0; done < s.jobCount; {
+			// select statements are blocking because it waits for the channel to become ready for communication before proceeding
+			// this allows for concurrent AND synchronous event processing which is the behavior we want for this type of simulation
+			select {
+			// select will block and wait for a message to be received on the event channel
+			case event := <-eventChannel:
+				if event.etype == "REPAIR" {
+					broken--
+				} else if event.etype == "DONE" {
+					done++
+					inflight--
+				}
+			}
+		}
+		doneChannel <- struct{}{}
+	}()
+
+	<-doneChannel
 	return
 }
 

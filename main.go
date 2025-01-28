@@ -63,45 +63,53 @@ type Simulation struct {
 	processingTime int
 }
 
-// func to run the sim and return 3 duration percentages (50, 90 and 100)
+// func to run the sim and return 3 duration percentages (50, 95, and 99)
 func (s *Simulation) run(seed int64) (percentileTime [3]int) {
 	rgen := rand.New(rand.NewSource(seed))
 	eventChannel := make(chan Event)
 	doneChannel := make(chan struct{})
 	var inflight, broken int
 
-	// create a go routine for each processing unit, each proccessor will have its own go routine
+	// create a go routine for each processing unit, each processor will have its own go routine
 	for i := 0; i < s.processors; i++ {
 		go func() {
+			currentTime := 0 // Track cumulative time for this processor
 			for {
 				// dice roll to see if the pu breaks
-				// append a repair event to the event channel
 				if rgen.Float32() < s.breakChance {
 					repairTime := s.repairTime + int(rgen.NormFloat64()*float64(s.repairTime)/4)
-					eventChannel <- Event{etype: "REPAIR", time: repairTime}
+					eventChannel <- Event{etype: "REPAIR", time: currentTime + repairTime}
+					currentTime += repairTime
 					time.Sleep(time.Duration(repairTime) * time.Millisecond)
+				} else {
+					// otherwise, process the event and append a done event to the event channel
+					processingTime := s.processingTime + int(rgen.NormFloat64()*float64(s.processingTime)/4)
+					eventChannel <- Event{etype: "DONE", time: currentTime + processingTime}
+					currentTime += processingTime
+					time.Sleep(time.Duration(processingTime) * time.Millisecond)
 				}
-				// otherwise, process the event and append a done event to the event channel
-				processingTime := s.processingTime + int(rgen.NormFloat64()*float64(s.processingTime)/4)
-				eventChannel <- Event{etype: "DONE", time: processingTime}
-				time.Sleep(time.Duration(processingTime) * time.Millisecond)
 			}
 		}()
 	}
 
-	// central event loop, listens on eventChannel, channels in Go are FIFO so they behave like queues
+	// central event loop, listens on eventChannel
 	go func() {
 		for done := 0; done < s.jobCount; {
-			// select statements are blocking because it waits for the channel to become ready for communication before proceeding
-			// this allows for concurrent AND synchronous event processing which is the behavior we want for this type of simulation
-			select {
-			// select will block and wait for a message to be received on the event channel
-			case event := <-eventChannel:
-				if event.etype == "REPAIR" {
-					broken--
-				} else if event.etype == "DONE" {
-					done++
-					inflight--
+			// receive a message from the event channel
+			event := <-eventChannel
+			if event.etype == "REPAIR" {
+				broken--
+			} else if event.etype == "DONE" {
+				done++
+				inflight--
+
+				// Calculate the percentage of jobs done
+				percentDone := 100 * done / s.jobCount
+				percentiles := []int{50, 95, 99}
+				for idx, p := range percentiles {
+					if percentDone >= p && percentileTime[idx] == 0 {
+						percentileTime[idx] = event.time // Use event.time as the cumulative time
+					}
 				}
 			}
 		}
@@ -135,6 +143,6 @@ func main() {
 	res := SIM.run(100)
 
 	// print out results
-	fmt.Printf("Time to finish: 50%% = %d, 75%% = %d, 100%% = %d\n", res[0], res[1], res[2])
-	fmt.Printf("Relative Time to X%%: 50%% = 1x, 75%% = %.2fx, 100%% = %.2fx\n", float32(res[1])/float32(res[0]), float32(res[2])/float32(res[0]))
+	fmt.Printf("Time to finish: 50%% = %d, 95%% = %d, 99%% = %d\n", res[0], res[1], res[2])
+	fmt.Printf("Relative Time to X%%: 50%% = 1x, 95%% = %.2fx, 99%% = %.2fx\n", float32(res[1])/float32(res[0]), float32(res[2])/float32(res[0]))
 }
